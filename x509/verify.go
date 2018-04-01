@@ -190,6 +190,10 @@ type VerifyOptions struct {
 	// certificates from consuming excessive amounts of CPU time when
 	// validating.
 	MaxConstraintComparisions int
+	// IgnoreSanity removes any sanity checks around chain building, as
+	// long as a cert is signed by its parent, and its parent can sign,
+	// then the certificate is considered valid.
+	IgnoreSanity bool
 }
 
 const (
@@ -582,7 +586,7 @@ func ekuPermittedBy(eku, certEKU ExtKeyUsage) bool {
 // isValid performs validity checks on c given that it is a candidate to append
 // to the chain in currentChain.
 func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *VerifyOptions) error {
-	if len(c.UnhandledCriticalExtensions) > 0 {
+	if !opts.IgnoreSanity && len(c.UnhandledCriticalExtensions) > 0 {
 		return UnhandledCriticalExtension{ID: c.UnhandledCriticalExtensions[0]}
 	}
 
@@ -593,7 +597,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		}
 	}
 
-	if !opts.DisableTimeChecks {
+	if !opts.IgnoreSanity && !opts.DisableTimeChecks {
 		now := opts.CurrentTime
 		if now.IsZero() {
 			now = time.Now()
@@ -617,7 +621,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		leaf = currentChain[0]
 	}
 
-	if (certType == intermediateCertificate || certType == rootCertificate) && c.hasNameConstraints() {
+	if !opts.IgnoreSanity && ((certType == intermediateCertificate || certType == rootCertificate) && c.hasNameConstraints()) {
 		sanExtension, ok := leaf.getSANExtension()
 		if !ok {
 			// This is the deprecated, legacy case of depending on
@@ -692,7 +696,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		}
 	}
 
-	checkEKUs := certType == intermediateCertificate
+	checkEKUs := !opts.IgnoreSanity && certType == intermediateCertificate
 
 	// If no extended key usages are specified, then all are acceptable.
 	if checkEKUs && (len(c.ExtKeyUsage) == 0 && len(c.UnknownExtKeyUsage) == 0) {
@@ -766,7 +770,7 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		return CertificateInvalidError{c, NotAuthorizedToSign, ""}
 	}
 
-	if c.BasicConstraintsValid && c.MaxPathLen >= 0 {
+	if !opts.IgnoreSanity && c.BasicConstraintsValid && c.MaxPathLen >= 0 {
 		numIntermediates := len(currentChain) - 1
 		if numIntermediates > c.MaxPathLen {
 			return CertificateInvalidError{c, TooManyIntermediates, ""}
