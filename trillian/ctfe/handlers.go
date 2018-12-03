@@ -109,6 +109,8 @@ var (
 	reqsCounter      monitoring.Counter   // logid, ep => value
 	rspsCounter      monitoring.Counter   // logid, ep, rc => value
 	rspLatency       monitoring.Histogram // logid, ep, rc => value
+
+	addChainLatency monitoring.Histogram
 )
 
 // setupMetrics initializes all the exported metrics.
@@ -123,6 +125,8 @@ func setupMetrics(mf monitoring.MetricFactory) {
 	reqsCounter = mf.NewCounter("http_reqs", "Number of requests", "logid", "ep")
 	rspsCounter = mf.NewCounter("http_rsps", "Number of responses", "logid", "ep", "rc")
 	rspLatency = mf.NewHistogram("http_latency", "Latency of responses in seconds", "logid", "ep", "rc")
+
+	addChainLatency = mf.NewHistogram("add_chain_breakdown", "IT DOES WHAT IT SAYS", "section")
 }
 
 // Entrypoints is a list of entrypoint names as exposed in statistics/logging.
@@ -367,6 +371,10 @@ func (li *logInfo) chargeUser(r *http.Request) *trillian.ChargeTo {
 // addChainInternal is called by add-chain and add-pre-chain as the logic involved in
 // processing these requests is almost identical
 func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r *http.Request, isPrecert bool) (int, error) {
+	s1 := time.Now()
+	defer func() {
+		addChainLatency.Observe(time.Since(s1).Seconds(), "total")
+	}()
 	var method EntrypointName
 	var etype ct.LogEntryType
 	if isPrecert {
@@ -377,11 +385,13 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 		etype = ct.X509LogEntryType
 	}
 
+	s2 := time.Now()
 	// Check the contents of the request and convert to slice of certificates.
 	addChainReq, err := parseBodyAsJSONChain(li, r)
 	if err != nil {
 		return http.StatusBadRequest, fmt.Errorf("failed to parse add-chain body: %s", err)
 	}
+	addChainLatency.Observe(time.Since(s2).Seconds(), "parse")
 	// Log the DERs now because they might not parse as valid X.509.
 	for _, der := range addChainReq.Chain {
 		li.RequestLog.AddDERToChain(ctx, der)
@@ -397,6 +407,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 	// epoch, and use this throughout.
 	timeMillis := uint64(li.TimeSource.Now().UnixNano() / millisPerNano)
 
+	s3 := time.Now()
 	// Build the MerkleTreeLeaf that gets sent to the backend, and make a trillian.LogLeaf for it.
 	merkleLeaf, err := ct.MerkleTreeLeafFromChain(chain, etype, timeMillis)
 	if err != nil {
@@ -406,6 +417,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("failed to build LogLeaf: %s", err)
 	}
+	addChainLatency.Observe(time.Since(s3).Seconds(), "leaf_from_chain")
 
 	// Send the Merkle tree leaf on to the Log server.
 	req := trillian.QueueLeavesRequest{
@@ -420,6 +432,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 		}
 	}
 
+	s4 := time.Now()
 	glog.V(2).Infof("%s: %s => grpc.QueueLeaves", li.LogPrefix, method)
 	rsp, err := li.rpcClient.QueueLeaves(ctx, &req)
 	glog.V(2).Infof("%s: %s <= grpc.QueueLeaves err=%v", li.LogPrefix, method, err)
@@ -433,6 +446,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 		return http.StatusInternalServerError, fmt.Errorf("unexpected QueueLeaves response leaf count: %d", len(rsp.QueuedLeaves))
 	}
 	queuedLeaf := rsp.QueuedLeaves[0]
+	addChainLatency.Observe(time.Since(s4).Seconds(), "queueing")
 
 	// Always use the returned leaf as the basis for an SCT.
 	var loggedLeaf ct.MerkleTreeLeaf
@@ -442,6 +456,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 		return http.StatusInternalServerError, fmt.Errorf("extra data (%d bytes) on reconstructing MerkleTreeLeaf", len(rest))
 	}
 
+	s5 := time.Now()
 	// As the Log server has definitely got the Merkle tree leaf, we can
 	// generate an SCT and respond with it.
 	sct, err := buildV1SCT(li.signer, &loggedLeaf)
@@ -463,6 +478,7 @@ func addChainInternal(ctx context.Context, li *logInfo, w http.ResponseWriter, r
 	if sct.Timestamp == timeMillis {
 		lastSCTTimestamp.Set(float64(sct.Timestamp), strconv.FormatInt(li.logID, 10))
 	}
+	addChainLatency.Observe(time.Since(s5).Seconds(), "build_issue_sct")
 
 	return http.StatusOK, nil
 }
@@ -853,17 +869,21 @@ func getRPCDeadlineTime(li *logInfo) time.Time {
 // by fixchain (called by this code) plus the ones here to make sure that it is compliant.
 func verifyAddChain(li *logInfo, req ct.AddChainRequest, expectingPrecert bool) ([]*x509.Certificate, error) {
 	// We already checked that the chain is not empty so can move on to verification
+	s1 := time.Now()
 	validPath, err := ValidateChain(req.Chain, li.validationOpts)
 	if err != nil {
 		// We rejected it because the cert failed checks or we could not find a path to a root etc.
 		// Lots of possible causes for errors
 		return nil, fmt.Errorf("chain failed to verify: %s", err)
 	}
+	addChainLatency.Observe(time.Since(s1).Seconds(), "validate_chain")
 
+	s2 := time.Now()
 	isPrecert, err := IsPrecertificate(validPath[0])
 	if err != nil {
 		return nil, fmt.Errorf("precert test failed: %s", err)
 	}
+	addChainLatency.Observe(time.Since(s2).Seconds(), "is_precert")
 
 	// The type of the leaf must match the one the handler expects
 	if isPrecert != expectingPrecert {
