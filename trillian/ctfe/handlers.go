@@ -111,6 +111,7 @@ var (
 	rspLatency       monitoring.Histogram // logid, ep, rc => value
 
 	addChainLatency monitoring.Histogram
+	validateLatency monitoring.Histogram
 )
 
 // setupMetrics initializes all the exported metrics.
@@ -127,6 +128,7 @@ func setupMetrics(mf monitoring.MetricFactory) {
 	rspLatency = mf.NewHistogram("http_latency", "Latency of responses in seconds", "logid", "ep", "rc")
 
 	addChainLatency = mf.NewHistogram("add_chain_breakdown", "IT DOES WHAT IT SAYS", "section")
+	validateLatency = mf.NewHistogram("validate_breakdown", "???", "section")
 }
 
 // Entrypoints is a list of entrypoint names as exposed in statistics/logging.

@@ -47,10 +47,15 @@ func IsPrecertificate(cert *x509.Certificate) (bool, error) {
 // supplied in the chain. Then applies the RFC requirement that the path must involve all
 // the submitted chain in the order of submission.
 func ValidateChain(rawChain [][]byte, validationOpts CertValidationOpts) ([]*x509.Certificate, error) {
+	st := time.Now()
+	defer func() {
+		validateLatency.Observe(time.Since(st).Seconds(), "total")
+	}()
 	// First make sure the certs parse as X.509
 	chain := make([]*x509.Certificate, 0, len(rawChain))
 	intermediatePool := NewPEMCertPool()
 
+	s1 := time.Now()
 	for i, certBytes := range rawChain {
 		cert, err := x509.ParseCertificate(certBytes)
 		if x509.IsFatal(err) {
@@ -64,6 +69,7 @@ func ValidateChain(rawChain [][]byte, validationOpts CertValidationOpts) ([]*x50
 			intermediatePool.AddCert(cert)
 		}
 	}
+	validateLatency.Observe(time.Since(s1).Seconds(), "build_pool")
 
 	naStart := validationOpts.notAfterStart
 	naLimit := validationOpts.notAfterLimit
@@ -115,15 +121,18 @@ func ValidateChain(rawChain [][]byte, validationOpts CertValidationOpts) ([]*x50
 		KeyUsages:                   validationOpts.extKeyUsages,
 	}
 
+	s2 := time.Now()
 	verifiedChains, err := cert.Verify(verifyOpts)
 	if err != nil {
 		return nil, err
 	}
+	validateLatency.Observe(time.Since(s2).Seconds(), "verify")
 
 	if len(verifiedChains) == 0 {
 		return nil, errors.New("no path to root found when trying to validate chains")
 	}
 
+	s3 := time.Now()
 	// Verify might have found multiple paths to roots. Now we check that we have a path that
 	// uses all the certs in the order they were submitted so as to comply with RFC 6962
 	// requirements detailed in Section 3.1.
@@ -132,6 +141,7 @@ func ValidateChain(rawChain [][]byte, validationOpts CertValidationOpts) ([]*x50
 			return verifiedChain, nil
 		}
 	}
+	validateLatency.Observe(time.Since(s3).Seconds(), "equiv_check")
 
 	return nil, errors.New("no RFC compliant path to root found when trying to validate chain")
 }
